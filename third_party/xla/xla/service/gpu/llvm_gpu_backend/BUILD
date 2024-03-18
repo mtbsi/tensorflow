@@ -2,7 +2,11 @@ load(
     "@local_config_rocm//rocm:build_defs.bzl",
     "if_rocm_is_configured",
 )
-load("@local_tsl//tsl:tsl.bzl", "internal_visibility")
+load("@local_tsl//tsl:tsl.bzl", "if_oss", "internal_visibility")
+load(
+    "@local_tsl//tsl/platform/default:cuda_build_defs.bzl",
+    "if_cuda_is_configured",
+)
 load("//xla:xla.bzl", "xla_cc_test")
 
 package(
@@ -28,6 +32,9 @@ cc_library(
         "gpu_backend_lib.h",
         "utils.h",
     ],
+    data = if_oss(if_cuda_is_configured([
+        "@cuda_nvcc//:nvvm",
+    ])),
     deps = [
         "//xla:status",
         "//xla:status_macros",

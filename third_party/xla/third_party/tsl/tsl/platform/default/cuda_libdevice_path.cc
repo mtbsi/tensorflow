@@ -30,7 +30,10 @@ limitations under the License.
 #endif
 
 #if !defined(PLATFORM_GOOGLE)
+#include <cstdlib>
+
 #include "third_party/gpus/cuda/cuda_config.h"
+#include "tsl/platform/env.h"
 #endif
 #include "tsl/platform/logging.h"
 
@@ -38,8 +41,23 @@ namespace tsl {
 
 std::vector<std::string> CandidateCudaRoots() {
 #if !defined(PLATFORM_GOOGLE)
-  auto roots = std::vector<std::string>{TF_CUDA_TOOLKIT_PATH,
-                                        std::string("/usr/local/cuda")};
+  auto roots = std::vector<std::string>{TF_CUDA_TOOLKIT_PATH};
+  char* cuda_toolkit_path_env_variable = getenv("CUDA_TOOLKIT_PATH");
+  if (cuda_toolkit_path_env_variable != NULL) {
+    std::string cuda_toolkit_path_str(cuda_toolkit_path_env_variable);
+    roots.push_back(cuda_toolkit_path_str);
+  }
+  std::string runfiles_suffix = "runfiles";
+  std::string executable_path = tsl::Env::Default()->GetExecutablePath();
+  std::string cuda_nvcc_dir =
+      io::JoinPath(executable_path + "." + runfiles_suffix, "cuda_nvcc");
+  roots.push_back(cuda_nvcc_dir);
+  std::string runfiles_dir = tsl::Env::Default()->GetRunfilesDir();
+  std::size_t runfiles_ind = runfiles_dir.rfind(runfiles_suffix);
+  cuda_nvcc_dir = io::JoinPath(
+      runfiles_dir.substr(0, runfiles_ind + runfiles_suffix.length()),
+      "cuda_nvcc");
+  roots.push_back(cuda_nvcc_dir);
 
 #if defined(PLATFORM_POSIX) && !defined(__APPLE__)
   Dl_info info;

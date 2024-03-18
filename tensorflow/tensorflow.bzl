@@ -129,6 +129,9 @@ def if_google(google_value, oss_value = []):
     """
     return oss_value  # copybara:comment_replace return google_value
 
+def if_cuda_configured(cuda_value, default_value = []):
+    return if_cuda(cuda_value, default_value)
+
 def if_v2(a):
     return select({
         clean_dep("//tensorflow:api_version_2"): a,

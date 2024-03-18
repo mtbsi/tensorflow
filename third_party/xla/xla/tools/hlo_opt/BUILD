@@ -2,6 +2,7 @@ load(
     "@local_config_rocm//rocm:build_defs.bzl",
     "if_rocm_is_configured",
 )
+load("@local_tsl//tsl:tsl.bzl", "if_oss")
 load("@local_tsl//tsl:tsl.default.bzl", "filegroup")
 load(
     "@local_tsl//tsl/platform:build_config_root.bzl",
@@ -162,6 +163,7 @@ lit_test_suite(
         "--param=GPU=mi200",
     ]),
     cfg = "//xla:lit.cfg.py",
+    cuda_tools = if_oss(if_cuda_is_configured(["@cuda_nvcc//:ptxas"])),
     data = [":test_utilities"],
     default_tags = tf_cuda_tests_tags(),
     tags_override = {
