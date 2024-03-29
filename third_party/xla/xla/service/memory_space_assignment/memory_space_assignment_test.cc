@@ -4681,6 +4681,75 @@ TEST_P(MemorySpaceAssignmentTest,
   EXPECT_EQ(tanh4->shape().layout().memory_space(), kDefaultMemorySpace);
 }
 
+TEST_P(MemorySpaceAssignmentTest,
+       MemoryBoundednessOverrideSortOrderBySizeGteAssignLast) {
+  // Override MSA sort order and try to assign all negates to alternate memory
+  // last but size 48 does not match the size_lte constraint.
+  absl::string_view hlo_string = R"(
+  HloModule module, is_scheduled=true
+
+  ENTRY entry {
+    p0 = f32[3,4]{1,0} parameter(0)
+    p1 = f32[5,4]{1,0} parameter(1)
+    tanh0 = f32[3,4]{1,0} tanh(p0)
+    negate0 = f32[5,4]{1,0} negate(p1)
+    tanh1 = f32[3,4]{1,0} tanh(tanh0)
+    negate1 = f32[5,4]{1,0} negate(negate0)
+    tanh2 = f32[3,4]{1,0} tanh(tanh1)
+    negate2 = f32[5,4]{1,0} negate(negate1)
+    tanh3 = f32[3,4]{1,0} tanh(tanh2)
+    negate3 = f32[5,4]{1,0} negate(negate2)
+    tanh4 = f32[3,4]{1,0} tanh(tanh3)
+    negate4 = f32[5,4]{1,0} negate(negate3)
+    ROOT tuple = (f32[3,4]{1,0}, f32[5,4]{1,0}) tuple(tanh4, negate4)
+  }
+  )";
+
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<VerifiedHloModule> module,
+                          ParseAndReturnVerifiedModule(hlo_string));
+
+  const std::string text_proto = R"pb(
+    overrides {
+      hlo_position_matcher { size_gte: 20 }
+      override_options { assign_last: true }
+    }
+  )pb";
+  TF_ASSERT_OK_AND_ASSIGN(auto msa_sort_order_overrides,
+                          ParseTextProto<MsaSortOrderOverrides>(text_proto));
+
+  AssignMemorySpaceUsingCostAnalysis(
+      module.get(), /*memory_space_options_override=*/std::nullopt,
+      /*cost_analysis_options_override=*/std::nullopt,
+      /*hlo_cost_options_override=*/std::nullopt,
+      /*optional_msa_sort_order_overrides=*/msa_sort_order_overrides);
+  // Parameters are in the default memory space.
+  const HloInstruction* p0 = FindInstruction(module.get(), "p0");
+  EXPECT_EQ(p0->shape().layout().memory_space(), kDefaultMemorySpace);
+  const HloInstruction* p1 = FindInstruction(module.get(), "p1");
+  EXPECT_EQ(p1->shape().layout().memory_space(), kDefaultMemorySpace);
+  // All negates are in default memory space except negate3.
+  HloInstruction* negate0 = FindInstruction(module.get(), "negate0");
+  EXPECT_EQ(negate0->shape().layout().memory_space(), kDefaultMemorySpace);
+  HloInstruction* negate1 = FindInstruction(module.get(), "negate1");
+  EXPECT_EQ(negate1->shape().layout().memory_space(), kDefaultMemorySpace);
+  HloInstruction* negate2 = FindInstruction(module.get(), "negate2");
+  EXPECT_EQ(negate2->shape().layout().memory_space(), kDefaultMemorySpace);
+  HloInstruction* negate3 = FindInstruction(module.get(), "negate3");
+  EXPECT_EQ(negate3->shape().layout().memory_space(), kAlternateMemorySpace);
+  HloInstruction* negate4 = FindInstruction(module.get(), "negate4");
+  EXPECT_EQ(negate4->shape().layout().memory_space(), kDefaultMemorySpace);
+  const HloInstruction* tanh0 = FindInstruction(module.get(), "tanh0");
+  EXPECT_EQ(tanh0->shape().layout().memory_space(), kAlternateMemorySpace);
+  const HloInstruction* tanh1 = FindInstruction(module.get(), "tanh1");
+  EXPECT_EQ(tanh1->shape().layout().memory_space(), kAlternateMemorySpace);
+  const HloInstruction* tanh2 = FindInstruction(module.get(), "tanh2");
+  EXPECT_EQ(tanh2->shape().layout().memory_space(), kAlternateMemorySpace);
+  const HloInstruction* tanh3 = FindInstruction(module.get(), "tanh3");
+  EXPECT_EQ(tanh3->shape().layout().memory_space(), kAlternateMemorySpace);
+  const HloInstruction* tanh4 = FindInstruction(module.get(), "tanh4");
+  EXPECT_EQ(tanh4->shape().layout().memory_space(), kDefaultMemorySpace);
+}
+
 TEST_P(MemorySpaceAssignmentTest, SimpleWhileTupleTest) {
   Shape s32 = ShapeUtil::MakeShape(xla::S32, {});
   Shape f32v1 = ShapeUtil::MakeShape(F32, {1});

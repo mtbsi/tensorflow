@@ -482,6 +482,14 @@ bool DoesResultMatchFilter(const HloPositionMatcher& filter,
                           filter.tuple_index().index().end())) {
     return false;
   }
+  if (filter.has_size_gte() &&
+      filter.size_gte() > ShapeUtil::ByteSizeOf(instruction->shape(), 8)) {
+    return false;
+  }
+  if (filter.has_size_lte() &&
+      filter.size_lte() < ShapeUtil::ByteSizeOf(instruction->shape(), 8)) {
+    return false;
+  }
   return true;
 }
 
