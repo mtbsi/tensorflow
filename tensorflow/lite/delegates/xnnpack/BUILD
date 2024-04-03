@@ -252,6 +252,7 @@ cc_library(
         ":tflite_with_xnnpack_transient_indirection_buffer",
         "//tensorflow/lite:kernel_api",
         "//tensorflow/lite:minimal_logging",
+        "//tensorflow/lite/c:c_api_types",
         "//tensorflow/lite/core:subgraph",
         "//tensorflow/lite/core/api",
         "//tensorflow/lite/core/c:common",
@@ -265,6 +266,7 @@ cc_library(
         "//tensorflow/lite/tools/optimize:reduced_precision_support",
         "@XNNPACK",
         "@XNNPACK//:experiments_config",
+        "@XNNPACK//:logging",
     ],
 )
 
@@ -288,6 +290,7 @@ cc_library(
         ":quantization_util",
         "//tensorflow/lite:kernel_api",
         "//tensorflow/lite:minimal_logging",
+        "//tensorflow/lite/c:c_api_types",
         "//tensorflow/lite/core:subgraph",
         "//tensorflow/lite/core/api",
         "//tensorflow/lite/core/c:common",
@@ -301,6 +304,7 @@ cc_library(
         "//tensorflow/lite/tools/optimize:reduced_precision_support",
         "@XNNPACK//:XNNPACK_test_mode",
         "@XNNPACK//:experiments_config",
+        "@XNNPACK//:logging",
     ],
 )
 
@@ -357,6 +361,7 @@ cc_library(
     srcs = ["batch_matrix_multiply_tester.cc"],
     hdrs = ["batch_matrix_multiply_tester.h"],
     deps = [
+        ":test_util",
         ":xnnpack_delegate_test_mode",
         "//tensorflow/lite:framework",
         "//tensorflow/lite:schema_fbs_version",
