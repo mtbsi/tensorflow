@@ -19,6 +19,7 @@ limitations under the License.
 #include <optional>
 #include <utility>
 #include <variant>
+#include <vector>
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
@@ -26,7 +27,7 @@ limitations under the License.
 #include "mlir/IR/MLIRContext.h"  // from @llvm-project
 #include "xla/hlo/ir/hlo_module.h"
 #include "xla/service/gpu/model/indexing_test_utils.h"
-#include "xla/service/gpu/model/symbolic_tiled_hlo_instruction.h"
+#include "xla/service/gpu/model/tiled_hlo_instruction.h"
 #include "xla/tests/hlo_test_base.h"
 #include "xla/tests/verified_hlo_module.h"
 #include "tsl/platform/statusor.h"
@@ -74,12 +75,13 @@ ENTRY main {
 
   EXPECT_TRUE(SetAnalysis(module.get()));
 
-  const SymbolicTiledHloInstruction* root = analysis_->GetRoot();
+  TF_ASSERT_OK_AND_ASSIGN(
+      std::vector<std::unique_ptr<TiledHloInstruction>> tiled_hlo_instructions,
+      analysis_->ComputeTiledHloInstructions(/*tile_parameters=*/{1, 10}));
 
-  analysis_->SetTileSizes(/*sizes=*/{1, 10});
+  TiledHloInstruction* root = tiled_hlo_instructions.back().get();
 
-  EXPECT_THAT(*analysis_->ComputeBlockIdToTileOffsetIndexing(*root),
-              MatchIndexingMap(R"(
+  EXPECT_THAT(root->block_id_to_tile_offsets_indexing(), MatchIndexingMap(R"(
     (d0) -> (d0 floordiv 10, (d0 mod 10) * 10)
     domain:
     d0 in [0, 19]
@@ -88,25 +90,21 @@ ENTRY main {
   auto p0_from_subtract0 = root->operand(0);
   auto p0_from_subtract1 = root->operand(1)->operand(0)->operand(0);
 
-  EXPECT_THAT(analysis_->TileOffsets(*p0_from_subtract0), ElementsAre(0, 0));
-  EXPECT_THAT(analysis_->TileSizes(*p0_from_subtract0), ElementsAre(1, 10));
-  EXPECT_THAT(analysis_->TileStrides(*p0_from_subtract0), ElementsAre(1, 1));
+  EXPECT_THAT(p0_from_subtract0->tile_sizes(), ElementsAre(1, 10));
+  EXPECT_THAT(p0_from_subtract0->tile_strides(), ElementsAre(1, 1));
 
-  EXPECT_THAT(
-      *analysis_->ComputeBlockIdToTileOffsetIndexing(*p0_from_subtract0),
-      MatchIndexingMap(R"(
+  EXPECT_THAT(p0_from_subtract0->block_id_to_tile_offsets_indexing(),
+              MatchIndexingMap(R"(
     (d0) -> (d0 floordiv 10, (d0 mod 10) * 10)
     domain:
     d0 in [0, 19]
   )"));
 
-  EXPECT_THAT(analysis_->TileOffsets(*p0_from_subtract1), ElementsAre(0, 0));
-  EXPECT_THAT(analysis_->TileSizes(*p0_from_subtract1), ElementsAre(1, 97));
-  EXPECT_THAT(analysis_->TileStrides(*p0_from_subtract1), ElementsAre(1, 1));
+  EXPECT_THAT(p0_from_subtract1->tile_sizes(), ElementsAre(1, 97));
+  EXPECT_THAT(p0_from_subtract1->tile_strides(), ElementsAre(1, 1));
 
-  EXPECT_THAT(
-      *analysis_->ComputeBlockIdToTileOffsetIndexing(*p0_from_subtract1),
-      MatchIndexingMap(R"(
+  EXPECT_THAT(p0_from_subtract1->block_id_to_tile_offsets_indexing(),
+              MatchIndexingMap(R"(
     (d0) -> (d0 floordiv 10, 0)
     domain:
     d0 in [0, 19]
@@ -125,7 +123,11 @@ ENTRY main {
 
   EXPECT_TRUE(SetAnalysis(module.get()));
 
-  const SymbolicTiledHloInstruction* root = analysis_->GetRoot();
+  TF_ASSERT_OK_AND_ASSIGN(
+      std::vector<std::unique_ptr<TiledHloInstruction>> tiled_hlo_instructions,
+      analysis_->ComputeTiledHloInstructions(/*tile_parameters=*/{1, 10}));
+
+  TiledHloInstruction* root = tiled_hlo_instructions.back().get();
 
   auto p0_from_subtract0 = root->operand(0)->operand(0);
   auto p0_from_subtract1 = root->operand(1)->operand(0);
@@ -143,18 +145,19 @@ ENTRY main {
 
   EXPECT_TRUE(SetAnalysis(module.get()));
 
-  analysis_->SetTileSizes(/*sizes=*/{2, 4, 2});
+  TF_ASSERT_OK_AND_ASSIGN(
+      std::vector<std::unique_ptr<TiledHloInstruction>> tiled_hlo_instructions,
+      analysis_->ComputeTiledHloInstructions(/*tile_parameters=*/{2, 4, 2}));
 
-  const SymbolicTiledHloInstruction* root = analysis_->GetRoot();
+  TiledHloInstruction* root = tiled_hlo_instructions.back().get();
 
-  EXPECT_THAT(*analysis_->ComputeBlockIdToTileOffsetIndexing(*root),
-              MatchIndexingMap(R"(
+  EXPECT_THAT(root->block_id_to_tile_offsets_indexing(), MatchIndexingMap(R"(
     (d0) -> ((d0 floordiv 16) * 2, ((d0 floordiv 8) mod 2) * 4, (d0 mod 8) * 2)
     domain:
     d0 in [0, 31]
   )"));
 
-  EXPECT_THAT(*analysis_->ComputeBlockIdToTileOffsetIndexing(*root->operand(0)),
+  EXPECT_THAT(root->operand(0)->block_id_to_tile_offsets_indexing(),
               MatchIndexingMap(R"(
     (d0) -> (((d0 floordiv 8) mod 2) * 4, (d0 mod 8) * 2, (d0 floordiv 16) * 2)
     domain:
@@ -195,10 +198,6 @@ ENTRY main {
   ROOT bitcast = f32[2] bitcast(p0)
 })"));
 
-  mlir::MLIRContext mlir_ctx;
-  SymbolicTileAnalysisOrError analysis_or_error =
-      SymbolicTileAnalysis::AnalyzeComputation(*module->entry_computation(),
-                                               &mlir_ctx);
   EXPECT_FALSE(SetAnalysis(module.get()));
 }
 
@@ -212,23 +211,6 @@ ENTRY main {
 })"));
 
   EXPECT_FALSE(SetAnalysis(module.get()));
-}
-
-TEST_F(SymbolicTileAnalysisTest, ComputingIndexingMapFailsWithoutTileSizes) {
-  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<VerifiedHloModule> module,
-                          ParseAndReturnVerifiedModule(R"(
-ENTRY main {
-  p0 = f32[4,8]{1,0} parameter(0)
-  ROOT exponential = f32[4,8]{1,0} exponential(p0)
-})"));
-
-  EXPECT_TRUE(SetAnalysis(module.get()));
-
-  const SymbolicTiledHloInstruction* root = analysis_->GetRoot();
-
-  EXPECT_THAT(
-      analysis_->ComputeBlockIdToTileOffsetIndexing(*root).status().message(),
-      ::testing::HasSubstr("SetTileSizes() must be called before"));
 }
 
 }  // namespace
