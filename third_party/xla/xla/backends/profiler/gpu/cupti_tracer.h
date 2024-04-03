@@ -96,7 +96,7 @@ class CuptiTracer {
 
   // Parses CUPTI activity events from activity buffer, and emits events for
   // CuptiTraceCollector. This function is public because called from registered
-  // callback.
+  // callback. This just cache the buffer in the collector_.
   absl::Status ProcessActivityBuffer(CUcontext context, uint32_t stream_id,
                                      uint8_t* buffer, size_t size);
 

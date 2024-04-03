@@ -296,6 +296,7 @@ tsl_gpu_library(
     copts = tf_profiler_copts() + tsl_copts(),
     visibility = ["//visibility:public"],
     deps = [
+        "@com_google_absl//absl/base",
         "@com_google_absl//absl/container:fixed_array",
         "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/container:flat_hash_set",

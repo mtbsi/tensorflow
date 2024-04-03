@@ -16,12 +16,19 @@ limitations under the License.
 #ifndef XLA_BACKENDS_PROFILER_GPU_CUPTI_COLLECTOR_H_
 #define XLA_BACKENDS_PROFILER_GPU_CUPTI_COLLECTOR_H_
 
+#include <algorithm>
+#include <atomic>
+#include <cstddef>
 #include <cstdint>
+#include <list>
 #include <memory>
+#include <string_view>
+#include <utility>
+#include <vector>
 
-#include "absl/container/fixed_array.h"
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/node_hash_set.h"
+#include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
 #include "tsl/platform/types.h"
@@ -223,43 +230,24 @@ struct CuptiTracerCollectorOptions {
   uint32_t num_gpus;
 };
 
-class AnnotationMap {
+struct AnnotationInfo {
+  absl::string_view annotation;
+  absl::string_view nvtx_range;
+};
+
+struct AnnotationMap : public absl::flat_hash_map<uint32_t, AnnotationInfo> {
  public:
-  struct AnnotationInfo {
-    absl::string_view annotation;
-    absl::string_view nvtx_range;
-  };
-
-  explicit AnnotationMap(uint64_t max_size, uint32_t num_gpus)
-      : max_size_(max_size), per_device_map_(num_gpus) {}
-  void Add(uint32_t device_id, uint32_t correlation_id,
-           const absl::string_view annotation,
-           const absl::string_view nvtx_range);
-  AnnotationInfo LookUp(uint32_t device_id, uint32_t correlation_id);
-
- private:
-  struct PerDeviceAnnotationMap {
-    // The population/consumption of annotations might happen from multiple
-    // callback/activity api related threads.
-    absl::Mutex mutex;
-    // Annotation tends to be repetitive, use a hash_set to store the strings,
-    // an use the reference to the string in the map.
-    absl::node_hash_set<std::string> annotations;
-    absl::node_hash_set<std::string> nvtx_ranges;
-    absl::flat_hash_map<uint32_t, AnnotationInfo> correlation_map;
-  };
-  const uint64_t max_size_;
-  absl::FixedArray<PerDeviceAnnotationMap> per_device_map_;
-
-  AnnotationMap(const AnnotationMap&) = delete;
-  void operator=(const AnnotationMap&) = delete;
+  AnnotationMap() = default;
+  AnnotationInfo LookUp(uint32_t device_id, uint32_t correlation_id) {
+    auto it = find(correlation_id);
+    return it == this->end() ? AnnotationInfo{} : it->second;
+  }
 };
 
 class CuptiTraceCollector {
  public:
   explicit CuptiTraceCollector(const CuptiTracerCollectorOptions& options)
-      : options_(options),
-        annotation_map_(options.max_annotation_strings, options.num_gpus) {}
+      : options_(options) {}
   virtual ~CuptiTraceCollector() {}
 
   // Producer side functions (i.e. called by CuptiTracer).
@@ -275,17 +263,47 @@ class CuptiTraceCollector {
   }
   virtual std::string ReportNumEventsIfDropped() { return ""; }
 
-  AnnotationMap* annotation_map() { return &annotation_map_; }
+  // Get annotation map which is merged from multi threads.
+  virtual AnnotationMap* annotation_map() { return nullptr; }
+
+  // Save annotation info into per thread callback annotations and events
+  // buffer, also append one empty event into the buffer.
+  virtual void AppendCallbackAnnotationEvent(uint32_t device_id,
+                                             uint32_t correlation_id,
+                                             absl::string_view annotation,
+                                             absl::string_view nvtx_range) {}
+
+  // Return the last event in per-thread call back event buffer or nullptr.
+  virtual CuptiTracerEvent* LastCallbackEvent() { return nullptr; }
+
+  // Gather all per-thread callback events and annotations.
+  // Merged annotation map (correltionId->annotation) cross per-thread data.
+  // Empty per-thread callback annotations and events.
+  virtual void GatherAllCallbackAnnotationsAndEvents() {}
+
+  // Clear all gathered callback events and annotations cross all threads.
+  // Clear the merged annotation map.
+  // Also empty per-thread callback annotations and events.
+  virtual void ClearAllAnnotatedEvents() {};
+
+  // Right before profiling, setting options which impact per-thread callback
+  // events collections.
+  virtual void PrepareOptionSettings() {};
+
+  // When cupti activity buffer is required to flush, save the buffer and its
+  // valid size some where. All the saved activity buffer will be handled
+  // after the profiling is stopped.
+  virtual void CacheActivityBuffer(uint8_t* buffer, size_t size) {};
 
  protected:
   CuptiTracerCollectorOptions options_;
 
- private:
-  AnnotationMap annotation_map_;
-
   CuptiTraceCollector(const CuptiTraceCollector&) = delete;
   void operator=(const CuptiTraceCollector&) = delete;
 };
+
+absl::Status ConvertActivityBuffer(CuptiTraceCollector* collector,
+                                   uint8_t* buffer, size_t size);
 
 std::unique_ptr<CuptiTraceCollector> CreateCuptiCollector(
     const CuptiTracerCollectorOptions& options, uint64_t start_walltime_ns,

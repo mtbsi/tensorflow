@@ -15,6 +15,7 @@ limitations under the License.
 
 #include "xla/backends/profiler/gpu/cupti_collector.h"
 
+#include "absl/base/call_once.h"
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
 #include "absl/hash/hash.h"
@@ -25,6 +26,7 @@ limitations under the License.
 #include "third_party/gpus/cuda/include/cuda_occupancy.h"
 #include "tsl/platform/abi.h"
 #include "tsl/platform/host_info.h"
+#include "tsl/platform/mem.h"
 #include "tsl/platform/mutex.h"
 #include "tsl/profiler/utils/parse_annotation.h"
 #include "tsl/profiler/utils/trace_utils.h"
@@ -335,8 +337,7 @@ class PerDeviceCollector {
         continue;
       }
       auto* plane = is_host_event ? host_plane : device_plane;
-      VLOG(9) << "Event"
-              << " type=" << static_cast<int>(event.type)
+      VLOG(9) << "Event" << " type=" << static_cast<int>(event.type)
               << " line_id=" << line_id
               << (is_host_event ? " host plane=" : " device plane=")
               << plane->Name();
@@ -467,36 +468,250 @@ class PerDeviceCollector {
   absl::flat_hash_map<DeviceOccupancyParams, OccupancyStats> occupancy_cache_;
 };
 
-}  // namespace
+template <typename T>
+class AppendOnlyBuffer {
+ public:
+  static constexpr size_t kBlockSize = 32768;
+  typedef std::vector<T> Block;
+  typedef std::list<Block> BlockList;
 
-void AnnotationMap::Add(uint32_t device_id, uint32_t correlation_id,
-                        const absl::string_view annotation,
-                        const absl::string_view nvtx_range) {
-  if (annotation.empty() && nvtx_range.empty()) return;
-  VLOG(3) << "Add annotation: device_id: " << device_id
-          << " correlation_id: " << correlation_id
-          << " annotation: " << annotation;
-  if (device_id >= per_device_map_.size()) return;
-  auto& per_device_map = per_device_map_[device_id];
-  absl::MutexLock lock(&per_device_map.mutex);
-  if (per_device_map.annotations.size() < max_size_) {
-    AnnotationInfo info;
-    info.annotation = *per_device_map.annotations.emplace(annotation).first;
-    if (!nvtx_range.empty())
-      info.nvtx_range = *per_device_map.nvtx_ranges.emplace(nvtx_range).first;
-    per_device_map.correlation_map.emplace(correlation_id, info);
+  explicit AppendOnlyBuffer(size_t block_size = kBlockSize)
+      : block_size_(std::max((size_t)1024, block_size)) {
+    Clear();
   }
-}
 
-AnnotationMap::AnnotationInfo AnnotationMap::LookUp(uint32_t device_id,
-                                                    uint32_t correlation_id) {
-  if (device_id >= per_device_map_.size()) return AnnotationInfo();
-  auto& per_device_map = per_device_map_[device_id];
-  absl::MutexLock lock(&per_device_map.mutex);
-  auto it = per_device_map.correlation_map.find(correlation_id);
-  return it != per_device_map.correlation_map.end() ? it->second
-                                                    : AnnotationInfo();
-}
+  void Clear() {
+    block_list_.clear();
+    size_ = 0;
+    last_block_ = &(block_list_.emplace_back());
+    last_block_->reserve(block_size_);
+  }
+
+  BlockList& GetBlocks() { return block_list_; }
+
+  void Append(const T& value) {
+    if (last_block_->size() >= block_size_) {
+      last_block_ = &(block_list_.emplace_back());
+      last_block_->reserve(block_size_);
+    }
+    last_block_->push_back(value);
+    size_++;
+  }
+
+  template <typename... Params>
+  void Emplace(Params... params) {
+    if (last_block_->size() >= block_size_) {
+      last_block_ = &(block_list_.emplace_back());
+      last_block_->reserve(block_size_);
+    }
+    last_block_->emplace_back(std::forward<Params>(params)...);
+    size_++;
+  }
+
+  size_t Size() const { return size_; }
+  T* LastElement() {
+    return (size_ > 0) ? (&(last_block_->back())) : (nullptr);
+  }
+
+  AppendOnlyBuffer& operator=(AppendOnlyBuffer&& another) {
+    block_size_ = another.block_size_;
+    block_list_ = std::move(another.block_list_);
+    last_block_ = &(block_list_.back());
+    size_ = another.size_;
+    another.Clear();
+    return *this;
+  }
+
+ private:
+  size_t block_size_ = kBlockSize;
+  size_t size_ = 0;
+  BlockList block_list_;
+  Block* last_block_ = nullptr;
+
+  AppendOnlyBuffer(AppendOnlyBuffer&&) = delete;
+};
+
+struct CallbackAnnotationsAndEvents {
+  // If atomic counter still cause serious overhead, we need change
+  // the max semantic to per thread level in the future.
+  static std::atomic<size_t> s_callback_api_event_count;
+
+  // Following need to be static no matter atomic counter is use or not.
+  static size_t s_max_annotation_strings;
+  static size_t s_max_callback_api_events;
+
+  struct EventWithAnnotation {
+    uint32_t correlation_id;
+    absl::string_view annotation;
+    absl::string_view nvtx_range;
+    CuptiTracerEvent event;
+
+    EventWithAnnotation() = default;
+    EventWithAnnotation(uint32_t corr_id, absl::string_view ann,
+                        absl::string_view nvtx)
+        : correlation_id(corr_id), annotation(ann), nvtx_range(nvtx), event{} {}
+  };
+
+  // Annotation tends to be repetitive, use a hash_set to store the strings,
+  // an use the reference to the string in the map.
+  absl::node_hash_set<std::string> annotations;
+  absl::node_hash_set<std::string> nvtx_ranges;
+  AppendOnlyBuffer<EventWithAnnotation> event_annotation_buffer;
+  size_t num_dropped_events = 0;
+
+  CallbackAnnotationsAndEvents() = default;
+  CallbackAnnotationsAndEvents(CallbackAnnotationsAndEvents&& another) {
+    annotations = std::move(another.annotations);
+    nvtx_ranges = std::move(another.nvtx_ranges);
+    event_annotation_buffer = std::move(another.event_annotation_buffer);
+    num_dropped_events = another.num_dropped_events;
+    another.num_dropped_events = 0;
+  }
+  void Add(uint32_t device_id, uint32_t correlation_id,
+           const absl::string_view annotation,
+           const absl::string_view nvtx_range) {
+    if (s_callback_api_event_count < s_max_callback_api_events) {
+      s_callback_api_event_count++;
+      // Some logic change as no cross thread string comparision should be
+      // make here. The max_annotation_string is used to limit per-thread
+      // annotation string count. And annotation string is not collected
+      // if total callback event could overflow.
+      bool too_many_annotations =
+          (annotations.size() >= s_max_annotation_strings);
+      event_annotation_buffer.Emplace(
+          correlation_id,
+          (too_many_annotations || annotation.empty())
+              ? std::string_view()
+              : *annotations.emplace(annotation).first,
+          (too_many_annotations || nvtx_range.empty())
+              ? std::string_view()
+              : *nvtx_ranges.emplace(nvtx_range).first);
+    } else {
+      num_dropped_events++;
+    }
+  }
+  void clear() {
+    annotations.clear();
+    nvtx_ranges.clear();
+    event_annotation_buffer.Clear();
+    num_dropped_events = 0;
+  }
+
+ private:
+  CallbackAnnotationsAndEvents(const CallbackAnnotationsAndEvents&) = delete;
+  CallbackAnnotationsAndEvents& operator=(const CallbackAnnotationsAndEvents&) =
+      delete;
+  CallbackAnnotationsAndEvents& operator=(
+      CallbackAnnotationsAndEvents&& another) = delete;
+};
+
+size_t CallbackAnnotationsAndEvents::s_max_annotation_strings = 1024 * 1024;
+size_t CallbackAnnotationsAndEvents::s_max_callback_api_events =
+    2 * 1024 * 1024;
+std::atomic<size_t> CallbackAnnotationsAndEvents::s_callback_api_event_count =
+    0;
+
+// All active or in-active per-thread callback annotations and events
+// buffers collected together. Due to the thread creating/destroying of
+// the api callback events and annotations buffer is not under our control,
+// this collection keep track of the per-thread data usage cross all
+// related threads, and handle their life cycles.
+class CallbackAnnotationsAndEventsCollection {
+ public:
+  static CallbackAnnotationsAndEventsCollection* Instance() {
+    static absl::once_flag create_once;
+    static CallbackAnnotationsAndEventsCollection* singleton = nullptr;
+    absl::call_once(create_once, [&]() {
+      singleton = new CallbackAnnotationsAndEventsCollection();
+    });
+    return singleton;
+  }
+  std::shared_ptr<CallbackAnnotationsAndEvents> CreateNew() {
+    tsl::mutex_lock lock(mutex_);
+    auto data = std::shared_ptr<CallbackAnnotationsAndEvents>(
+        new CallbackAnnotationsAndEvents());
+    active_set_.insert(data);
+    return data;
+  }
+
+  // when thread_local is destroyed due to thread exit, this method
+  // will be called to let this collection know the callback buffer
+  // is not owning by an active thread.
+  void Deactivate(std::shared_ptr<CallbackAnnotationsAndEvents> data) {
+    tsl::mutex_lock lock(mutex_);
+    if (data.get() != nullptr && active_set_.count(data)) {
+      active_set_.erase(data);
+      deactived_list_.emplace_back(data);
+    }
+  }
+
+  // Thread local data could to be aggregated by this.
+  // Yet it is caller's duty to avoid error from the parallel execution.
+  // i.e., caller must be sure that there is no active thread will update
+  // its data when calling this function.
+  std::list<std::shared_ptr<CallbackAnnotationsAndEvents>> CollectAll(
+      bool use_active = true, bool use_deactived = true) {
+    std::list<std::shared_ptr<CallbackAnnotationsAndEvents>> result;
+    tsl::mutex_lock lock(mutex_);
+    if (use_active) {
+      // Just move the data out, but keep the active data ptr valid
+      // It use move constructor to swap the original buffer.
+      for (auto t : active_set_) {
+        result.emplace_back(new CallbackAnnotationsAndEvents(std::move(*t)));
+      }
+    }
+    if (use_deactived) {
+      while (!deactived_list_.empty()) {
+        result.emplace_back(std::move(deactived_list_.front()));
+        deactived_list_.pop_front();
+      }
+    }
+    return result;
+  }
+
+ private:
+  tsl::mutex mutex_;
+
+  // data in active set is using by some active thread, so if this container
+  // is destroyed first, it means child thread is not correctly joined,
+  // data in active_set_ are not destroyed as only ptr stored in set. This may
+  // report expected memory/resource leaks, yet it is better than possible
+  // random crash in such case.
+  absl::flat_hash_set<std::shared_ptr<CallbackAnnotationsAndEvents>>
+      active_set_;
+  std::list<std::shared_ptr<CallbackAnnotationsAndEvents>> deactived_list_;
+
+  CallbackAnnotationsAndEventsCollection() = default;
+  CallbackAnnotationsAndEventsCollection(
+      const CallbackAnnotationsAndEventsCollection&) = delete;
+  CallbackAnnotationsAndEventsCollection& operator=(
+      const CallbackAnnotationsAndEventsCollection&) = delete;
+};
+
+// Perthread callback annotations and events buffer in shared_ptr.
+// While the thread own its life cycle, the data also shared owner with
+// CallbackAnnotationsAndEventsCollection singleton. So, when thread
+// destroyed, it will also notify the Collection singleton.
+class CallbackAnnotationsEventsWeakPtr {
+ public:
+  static CallbackAnnotationsAndEventsCollection* GeCollection() {
+    return CallbackAnnotationsAndEventsCollection::Instance();
+  }
+  explicit CallbackAnnotationsEventsWeakPtr() {
+    ptr_ = GeCollection()->CreateNew();
+  }
+  ~CallbackAnnotationsEventsWeakPtr() { GeCollection()->Deactivate(ptr_); }
+  CallbackAnnotationsAndEvents* get() { return ptr_.get(); }
+  CallbackAnnotationsAndEvents* operator->() { return ptr_.get(); }
+
+ private:
+  std::shared_ptr<CallbackAnnotationsAndEvents> ptr_;
+  void operator=(const CallbackAnnotationsEventsWeakPtr&) = delete;
+  CallbackAnnotationsEventsWeakPtr(const CallbackAnnotationsEventsWeakPtr&) =
+      delete;
+};
+
+}  // namespace
 
 // CuptiTraceCollectorImpl store the CuptiTracerEvents from CuptiTracer and
 // eventually convert and filter them to XSpace.
@@ -515,14 +730,10 @@ class CuptiTraceCollectorImpl : public CuptiTraceCollector {
   void AddEvent(CuptiTracerEvent&& event) override {
     if (event.device_id >= num_gpus_) return;
     if (event.source == CuptiTracerEventSource::DriverCallback) {
-      if (num_callback_events_ > options_.max_callback_api_events) {
-        OnEventsDropped("total driver(callback) events reaches max", 1);
-        return;
-      }
       num_callback_events_++;
     } else {
       if (num_activity_events_ > options_.max_activity_api_events) {
-        OnEventsDropped("total device(activity) events reaches max", 1);
+        dropped_activity_event_count_++;
         return;
       }
       num_activity_events_++;
@@ -534,9 +745,48 @@ class CuptiTraceCollectorImpl : public CuptiTraceCollector {
     absl::MutexLock lock(&mutex_);
     dropped_events_[reason] += num_events;
   }
+  void FinalizeActivityBuffers() {
+    dropped_activity_event_count_ = 0;
+    while (true) {
+      ActivityBufferAndSize buffer_and_size;
+      {
+        absl::MutexLock lock(&this->activity_buffers_mutex_);
+        if (activity_buffers_.empty()) break;
+        buffer_and_size = activity_buffers_.front();
+        activity_buffers_.pop_front();
+      }
+      ConvertActivityBuffer(this, buffer_and_size.buffer.get(),
+                            buffer_and_size.size)
+          .IgnoreError();
+    }
+    if (dropped_activity_event_count_ > 0) {
+      OnEventsDropped("total device(activity) events reaches max",
+                      dropped_activity_event_count_);
+    }
+  }
+  void FinalizeApiCallbackBuffers() {
+    for (auto& annotations_and_events : collected_annotation_and_events_) {
+      auto& buffer = annotations_and_events->event_annotation_buffer;
+      for (auto& block : buffer.GetBlocks()) {
+        for (auto& event_with_annotation : block) {
+          AddEvent(std::move(event_with_annotation.event));
+        }
+      }
+    }
+    if (dropped_callback_event_count_ > 0) {
+      OnEventsDropped("total driver(callback) events reaches max",
+                      dropped_callback_event_count_);
+    }
+  }
+
   void Flush() override {}
+
   // Returns true if some GPU events are captured.
   bool Export(XSpace* space, uint64_t end_gpu_ns) override {
+    GatherAllCallbackAnnotationsAndEvents();
+    FinalizeApiCallbackBuffers();
+    FinalizeActivityBuffers();
+
     LOG(INFO) << " GpuTracer has collected " << num_callback_events_
               << " callback api events and " << num_activity_events_
               << " activity events. " << ReportDroppedEvents();
@@ -547,8 +797,8 @@ class CuptiTraceCollectorImpl : public CuptiTraceCollector {
       std::string name = GpuPlaneName(device_ordinal);
       XPlaneBuilder device_plane(FindOrAddMutablePlaneWithName(space, name));
       device_plane.SetId(device_ordinal);
-      VLOG(4) << "Creating plane for"
-              << " name=" << name << " ordinal=" << device_ordinal;
+      VLOG(4) << "Creating plane for" << " name=" << name
+              << " ordinal=" << device_ordinal;
 
       // Calculate device capabilities before flushing, so that device
       // properties are available to the occupancy calculator in Flush().
@@ -581,8 +831,92 @@ class CuptiTraceCollectorImpl : public CuptiTraceCollector {
                         num_activity_events_.load(), " device events.",
                         events_dropped);
   }
+  void CacheActivityBuffer(uint8_t* buffer, size_t size) override {
+    absl::MutexLock lock(&activity_buffers_mutex_);
+    activity_buffers_.emplace_back(buffer, size);
+  }
+  void AppendCallbackAnnotationEvent(uint32_t device_id,
+                                     uint32_t correlation_id,
+                                     absl::string_view annotation,
+                                     absl::string_view nvtx_range) override {
+    callback_annotations_and_events_->Add(device_id, correlation_id, annotation,
+                                          nvtx_range);
+  }
+  CuptiTracerEvent* LastCallbackEvent() override {
+    auto* last_event =
+        callback_annotations_and_events_->event_annotation_buffer.LastElement();
+    return last_event ? &last_event->event : nullptr;
+  };
+  void GatherAllCallbackAnnotationsAndEvents() override {
+    collected_annotation_and_events_ =
+        CallbackAnnotationsAndEventsCollection::Instance()->CollectAll();
+    VLOG(3) << "Total grabbed per thread annotated events: "
+            << collected_annotation_and_events_.size();
+    merged_annotation_map_.clear();
+    dropped_callback_event_count_ = 0;
+    for (const auto& annotations_events : collected_annotation_and_events_) {
+      auto& buffer = annotations_events->event_annotation_buffer;
+      for (auto& block : buffer.GetBlocks()) {
+        for (auto& event_with_annotation : block) {
+          if (!event_with_annotation.annotation.empty() ||
+              !event_with_annotation.nvtx_range.empty()) {
+            merged_annotation_map_.emplace(
+                event_with_annotation.correlation_id,
+                AnnotationInfo{event_with_annotation.annotation,
+                               event_with_annotation.nvtx_range});
+          }
+        }
+      }
+      dropped_callback_event_count_ += annotations_events->num_dropped_events;
+    }
+    VLOG(3) << "Total merged annotation map: " << merged_annotation_map_.size();
+  }
+  void ClearAllAnnotatedEvents() override {
+    VLOG(3) << "Cupti collector is clearing per-thread and collected data!";
+    collected_annotation_and_events_.clear();
+    merged_annotation_map_.clear();
+    CallbackAnnotationsAndEventsCollection::Instance()->CollectAll().clear();
+    dropped_callback_event_count_ = 0;
+  }
+  void PrepareOptionSettings() override {
+    CallbackAnnotationsAndEvents::s_max_annotation_strings =
+        options_.max_annotation_strings;
+    CallbackAnnotationsAndEvents::s_max_callback_api_events =
+        options_.max_callback_api_events;
+    CallbackAnnotationsAndEvents::s_callback_api_event_count = 0;
+  }
+  AnnotationMap* annotation_map() override { return &merged_annotation_map_; }
 
  private:
+  static thread_local CallbackAnnotationsEventsWeakPtr
+      callback_annotations_and_events_;
+
+  size_t dropped_callback_event_count_ = 0;
+  size_t dropped_activity_event_count_ = 0;
+
+  // collected together at the end of profiling from all threads.
+  std::list<std::shared_ptr<CallbackAnnotationsAndEvents>>
+      collected_annotation_and_events_;
+
+  // merged correlation_id to annotation from raw collected annotations above
+  AnnotationMap merged_annotation_map_;
+
+  struct ActivityBufferAndSize {
+    std::shared_ptr<uint8_t> buffer;
+    size_t size;
+    ActivityBufferAndSize(uint8_t* p = nullptr, size_t sz = 0)
+        : buffer(p,
+                 [](uint8_t* x) {
+                   if (x != nullptr) tsl::port::AlignedFree(x);
+                 }),
+          size(sz) {}
+  };
+
+  // Mutex maybe not needed, need to check cupti implementations.
+  // Yet it is of low overhead.
+  absl::Mutex activity_buffers_mutex_;
+  std::list<ActivityBufferAndSize> activity_buffers_
+      ABSL_GUARDED_BY(activity_buffers_mutex_);
   std::atomic<int> num_callback_events_;
   std::atomic<int> num_activity_events_;
   absl::Mutex mutex_;
@@ -638,6 +972,9 @@ absl::string_view GetMemoryKindName(int8_t memory_kind) {
       return "unknown";
   }
 }
+
+thread_local CallbackAnnotationsEventsWeakPtr
+    CuptiTraceCollectorImpl::callback_annotations_and_events_;
 
 }  // namespace profiler
 }  // namespace xla
