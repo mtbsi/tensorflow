@@ -253,6 +253,7 @@ class QuantizedModelTest(test.TestCase, parameterized.TestCase):
       strides: Sequence[int] = (1, 1, 1, 1),
       dilations: Sequence[int] = (1, 1, 1, 1),
       padding: str = 'SAME',
+      has_func_alias: bool = False,
   ) -> module.Module:
     class ConvModel(module.Module):
       """A simple model with a single conv2d, bias and relu."""
@@ -309,6 +310,11 @@ class QuantizedModelTest(test.TestCase, parameterized.TestCase):
         return {'output': out}
 
     model = ConvModel()
+    save_options = None
+    if has_func_alias:
+      save_options = tensorflow.saved_model.SaveOptions(
+          function_aliases={'some_alias': model.conv2d}
+      )
     saved_model_save.save(
         model,
         saved_model_path,
@@ -317,6 +323,7 @@ class QuantizedModelTest(test.TestCase, parameterized.TestCase):
                 shape=input_shape, dtype=dtypes.float32, name='input_tensor'
             )
         ),
+        options=save_options,
     )
     return model
 

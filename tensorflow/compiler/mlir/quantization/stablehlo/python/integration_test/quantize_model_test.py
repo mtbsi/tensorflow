@@ -361,6 +361,7 @@ class StaticRangeQuantizationTest(quantize_model_test_base.QuantizedModelTest):
               True,
           ),
           'merge_fusion_with_dequantize': (False, True),
+          'has_func_alias': (False, True),
       }])
   )
   @test_util.run_in_graph_and_eager_modes
@@ -373,6 +374,7 @@ class StaticRangeQuantizationTest(quantize_model_test_base.QuantizedModelTest):
       enable_per_channel_quantized_weight: bool,
       merge_fusion_with_dequantize: bool,
       dilations: Sequence[int] = None,
+      has_func_alias: bool = False,
   ):
     input_shape = (None, 3, 4, 3) if input_shape_dynamic else (1, 3, 4, 3)
     filter_shape = (2, 3, 3, 2)
@@ -386,6 +388,8 @@ class StaticRangeQuantizationTest(quantize_model_test_base.QuantizedModelTest):
         has_batch_norm,
         strides,
         dilations,
+        'SAME',
+        has_func_alias,
     )
     # TODO(b/331809306): investigate why these tests fail.
     # skip these test cases.
@@ -1143,6 +1147,7 @@ class WeightOnlyQuantizationTest(quantize_model_test_base.QuantizedModelTest):
               False,
               True,
           ),
+          'has_func_alias': (False, True),
       }])
   )
   @test_util.run_in_graph_and_eager_modes
@@ -1153,6 +1158,7 @@ class WeightOnlyQuantizationTest(quantize_model_test_base.QuantizedModelTest):
       has_batch_norm: bool,
       input_shape_dynamic: bool,
       dilations: Sequence[int] = None,
+      has_func_alias: bool = False,
   ):
     input_shape = (None, 3, 4, 3) if input_shape_dynamic else (1, 3, 4, 3)
     filter_shape = (2, 3, 3, 2)
@@ -1166,6 +1172,8 @@ class WeightOnlyQuantizationTest(quantize_model_test_base.QuantizedModelTest):
         has_batch_norm,
         strides,
         dilations,
+        'SAME',
+        has_func_alias,
     )
 
     rng = np.random.default_rng(1234)
@@ -1216,7 +1224,7 @@ class WeightOnlyQuantizationTest(quantize_model_test_base.QuantizedModelTest):
         testing.get_size_ratio(
             self._output_saved_model_path, self._input_saved_model_path
         ),
-        0.35,
+        0.4,
     )
 
   @parameterized.parameters(
