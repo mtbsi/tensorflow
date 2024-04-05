@@ -17,14 +17,11 @@ limitations under the License.
 #define XLA_BACKENDS_PROFILER_GPU_CUPTI_COLLECTOR_H_
 
 #include <cstdint>
-#include <memory>
 
-#include "absl/container/fixed_array.h"
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/node_hash_set.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
-#include "tsl/platform/types.h"
 #include "tsl/profiler/protobuf/xplane.pb.h"
 
 namespace xla {
@@ -223,43 +220,17 @@ struct CuptiTracerCollectorOptions {
   uint32_t num_gpus;
 };
 
-class AnnotationMap {
- public:
-  struct AnnotationInfo {
-    absl::string_view annotation;
-    absl::string_view nvtx_range;
-  };
-
-  explicit AnnotationMap(uint64_t max_size, uint32_t num_gpus)
-      : max_size_(max_size), per_device_map_(num_gpus) {}
-  void Add(uint32_t device_id, uint32_t correlation_id,
-           const absl::string_view annotation,
-           const absl::string_view nvtx_range);
-  AnnotationInfo LookUp(uint32_t device_id, uint32_t correlation_id);
-
- private:
-  struct PerDeviceAnnotationMap {
-    // The population/consumption of annotations might happen from multiple
-    // callback/activity api related threads.
-    absl::Mutex mutex;
-    // Annotation tends to be repetitive, use a hash_set to store the strings,
-    // an use the reference to the string in the map.
-    absl::node_hash_set<std::string> annotations;
-    absl::node_hash_set<std::string> nvtx_ranges;
-    absl::flat_hash_map<uint32_t, AnnotationInfo> correlation_map;
-  };
-  const uint64_t max_size_;
-  absl::FixedArray<PerDeviceAnnotationMap> per_device_map_;
-
-  AnnotationMap(const AnnotationMap&) = delete;
-  void operator=(const AnnotationMap&) = delete;
+struct AnnotationInfo {
+  absl::string_view annotation;
+  absl::string_view nvtx_range;
 };
+
+typedef absl::flat_hash_map<uint32_t, AnnotationInfo> AnnotationMap;
 
 class CuptiTraceCollector {
  public:
   explicit CuptiTraceCollector(const CuptiTracerCollectorOptions& options)
-      : options_(options),
-        annotation_map_(options.max_annotation_strings, options.num_gpus) {}
+      : options_(options) {}
   virtual ~CuptiTraceCollector() {}
 
   // Producer side functions (i.e. called by CuptiTracer).
@@ -275,9 +246,15 @@ class CuptiTraceCollector {
   }
   virtual std::string ReportNumEventsIfDropped() { return ""; }
 
+  void SetAnnotationMap(AnnotationMap&& annotation_map) {
+    annotation_map_ = annotation_map;
+  }
   AnnotationMap* annotation_map() { return &annotation_map_; }
+  AnnotationInfo LookUpAnnotation(uint32_t device_id, uint32_t correlation_id) {
+    auto it = annotation_map_.find(correlation_id);
+    return it == annotation_map_.end() ? AnnotationInfo{} : it->second;
+  }
 
- protected:
   CuptiTracerCollectorOptions options_;
 
  private:

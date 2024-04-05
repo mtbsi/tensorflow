@@ -16,6 +16,9 @@ limitations under the License.
 #ifndef XLA_BACKENDS_PROFILER_GPU_CUPTI_TRACER_H_
 #define XLA_BACKENDS_PROFILER_GPU_CUPTI_TRACER_H_
 
+#include <functional>
+#include <memory>
+
 #include "absl/status/status.h"
 #include "absl/types/optional.h"
 #include "third_party/gpus/cuda/extras/CUPTI/include/cupti.h"
@@ -47,6 +50,10 @@ struct CuptiTracerOptions {
   bool enable_nvtx_tracking = false;
 };
 
+class CuptiTracer;
+class CallbackAnnotationsEventsWeakPtr;
+class CallbackAnnotationsAndEvents;
+
 class CuptiDriverApiHook {
  public:
   virtual ~CuptiDriverApiHook() {}
@@ -61,10 +68,9 @@ class CuptiDriverApiHook {
 
  protected:
   static absl::Status AddDriverApiCallbackEvent(
-      CuptiTraceCollector* collector, CuptiInterface* cupti_interface,
-      int device_id, uint64_t start_tsc, uint64_t end_tsc,
-      CUpti_CallbackDomain domain, CUpti_CallbackId cbid,
-      const CUpti_CallbackData* callback_info);
+      CuptiTracer* collector, CuptiInterface* cupti_interface, int device_id,
+      uint64_t start_tsc, uint64_t end_tsc, CUpti_CallbackDomain domain,
+      CUpti_CallbackId cbid, const CUpti_CallbackData* callback_info);
 };
 
 // The class use to enable cupti callback/activity API and forward the collected
@@ -96,7 +102,7 @@ class CuptiTracer {
 
   // Parses CUPTI activity events from activity buffer, and emits events for
   // CuptiTraceCollector. This function is public because called from registered
-  // callback.
+  // callback. This just cache the buffer in the collector_.
   absl::Status ProcessActivityBuffer(CUcontext context, uint32_t stream_id,
                                      uint8_t* buffer, size_t size);
 
@@ -105,11 +111,63 @@ class CuptiTracer {
   // Returns the error (if any) when using libcupti.
   static std::string ErrorIfAny();
 
+  // Return the last event in per-thread call back event buffer or nullptr.
+  CuptiTracerEvent* LastCallbackEvent();
+
  protected:
   // protected constructor for injecting mock cupti interface for testing.
   explicit CuptiTracer(CuptiInterface* cupti_interface);
 
  private:
+  // Gather all per-thread callback events and annotations.
+  // Merged annotation map (correltionId->annotation) cross per-thread data.
+  // Empty per-thread callback annotations and events.
+  void GatherAllCallbackAnnotationsAndEvents();
+
+  // Clear all gathered callback events and annotations cross all threads.
+  // Clear the merged annotation map.
+  // Also empty per-thread callback annotations and events.
+  void ClearAllAnnotatedEvents();
+
+  // Right before profiling, setting options which impact per-thread callback
+  // events collections.
+  void PrepareOptionSettings();
+
+  // Process cached activity buffer, add event into collector.
+  absl::Status ConvertActivityBuffer(uint8_t* buffer, size_t size);
+
+  void FinalizeActivityBuffers();
+
+  void FinalizeApiCallbackBuffers();
+
+  static thread_local CallbackAnnotationsEventsWeakPtr
+      callback_annotations_and_events_;
+
+  // collected together at the end of profiling from all threads.
+  std::list<std::shared_ptr<CallbackAnnotationsAndEvents>>
+      collected_annotation_and_events_;
+
+  // merged correlation_id to annotation from raw collected annotations above
+  AnnotationMap merged_annotation_map_;
+
+  struct ActivityBufferAndSize {
+    std::shared_ptr<uint8_t> buffer;
+    size_t size;
+    ActivityBufferAndSize(uint8_t* p = nullptr, size_t sz = 0);
+  };
+
+  // Mutex maybe not needed, need to check cupti implementations.
+  // Yet it is of low overhead.
+  absl::Mutex activity_buffers_mutex_;
+  std::list<ActivityBufferAndSize> activity_buffers_
+      ABSL_GUARDED_BY(activity_buffers_mutex_);
+  size_t estimated_num_dropped_activity_events_ = 0;
+  std::atomic<size_t> estimated_num_activity_events_ = 0;
+  std::atomic<size_t> cupti_dropped_activity_event_count_ = 0;
+
+  std::atomic<size_t> num_callback_events_ = 0;
+  std::atomic<size_t> dropped_callback_event_count_ = 0;
+
   // Buffer size and alignment, 32K and 8 as in CUPTI samples.
   static constexpr size_t kBufferSizeInBytes = 32 * 1024;
 
