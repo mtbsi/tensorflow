@@ -401,6 +401,33 @@ absl::StatusOr<bool> ProcessAnnotationForCopyMovement(
         VLOG(5) << "Couldn't find annotation for consumer instruction in chain";
         return false;
       }
+      if (annotation->IsCustomCall(
+              host_memory_offload_annotations::kMoveToDeviceCustomCallTarget)) {
+        for (auto& user : annotation->users()) {
+          HloInstruction* root_instruction =
+              annotation->parent()->root_instruction();
+          if (root_instruction == user &&
+              root_instruction->opcode() == HloOpcode::kTuple) {
+            auto callers =
+                call_graph->GetComputationCallers(annotation->parent());
+            if (callers.size() != 1 ||
+                callers[0]->opcode() != HloOpcode::kWhile) {
+              return absl::InvalidArgumentError(
+                  "Expected to be called only by one caller and caller be a "
+                  "While");
+            }
+            for (int i = 0; i < user->operands().size(); i++) {
+              if (user->operands()[i] == annotation) {
+                // Fix while loop's result tuple to not use move-to-device since
+                // at loop entry it's still on host.
+                root_instruction
+                    ->ReplaceOperandWith(i, annotation->mutable_operand(0))
+                    .IgnoreError();
+              }
+            }
+          }
+        }
+      }
       stack.pop_back();
       continue;
     }
@@ -478,25 +505,8 @@ absl::StatusOr<bool> ProcessAnnotationForCopyMovement(
                 "Expected to be called only by one caller");
           }
           auto* caller = callers[0];
-          if (caller->opcode() == HloOpcode::kWhile) {
-            update_shape_layout(std::make_pair(caller, instruction.second),
-                                copy_to_move.first);
-
-            HloInstruction* root_instruction =
-                caller->while_body()->root_instruction();
-            // Fix while loop's result tuple to not use move-to-device since
-            // at loop entry it's still on host.
-            if (root_instruction->operand(instruction.second)
-                    ->IsCustomCall(host_memory_offload_annotations::
-                                       kMoveToDeviceCustomCallTarget)) {
-              root_instruction
-                  ->ReplaceOperandWith(
-                      instruction.second,
-                      root_instruction->mutable_operand(instruction.second)
-                          ->mutable_operand(0))
-                  .IgnoreError();
-            }
-          }
+          update_shape_layout(std::make_pair(caller, instruction.second),
+                              copy_to_move.first);
         }
       }
       stack.pop_back();
