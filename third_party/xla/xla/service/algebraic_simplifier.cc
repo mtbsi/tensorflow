@@ -4562,9 +4562,11 @@ Status AlgebraicSimplifierVisitor::HandleBroadcast(HloInstruction* broadcast) {
         broadcast, HloInstruction::CreateReshape(broadcast->shape(), operand));
   }
 
-  // A degenerate broadcast that has the same input and output rank can be
-  // converted into a transpose.
+  // A broadcast that has the same input and output rank, and the inverse of the
+  // dimensions of the broadcast remains the same, it can be converted into a
+  // transpose of the same dimensions.
   if (broadcast->shape().rank() == operand->shape().rank() &&
+      InversePermutation(broadcast->dimensions()) == broadcast->dimensions() &&
       ShapeUtil::ElementsIn(broadcast->shape()) ==
           ShapeUtil::ElementsIn(operand->shape())) {
     VLOG(10) << "transform broadcast(X) -> transpose(X) where "
