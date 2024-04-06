@@ -884,7 +884,7 @@ int PjRtCApiMemorySpace::id() const {
   return args.id;
 }
 
-absl::string_view PjRtCApiMemorySpace::memory_space_kind() const {
+absl::string_view PjRtCApiMemorySpace::kind() const {
   PJRT_Memory_Kind_Args args;
   args.struct_size = PJRT_Memory_Kind_Args_STRUCT_SIZE;
   args.extension_start = nullptr;
@@ -893,7 +893,17 @@ absl::string_view PjRtCApiMemorySpace::memory_space_kind() const {
   pjrt::LogFatalIfPjrtError(pjrt_c_api()->PJRT_Memory_Kind(&args),
                             pjrt_c_api());
 
-  return absl::string_view(args.memory_kind, args.memory_kind_size);
+  return absl::string_view(args.kind, args.kind_size);
+}
+
+int PjRtCApiMemorySpace::kind_id() const {
+  PJRT_Memory_Kind_Id_Args args;
+  args.struct_size = PJRT_Memory_Kind_Id_Args_STRUCT_SIZE;
+  args.extension_start = nullptr;
+  args.memory = c_memory_;
+  pjrt::LogFatalIfPjrtError(pjrt_c_api()->PJRT_Memory_Kind_Id(&args),
+                            pjrt_c_api());
+  return args.kind_id;
 }
 
 absl::string_view PjRtCApiMemorySpace::DebugString() const {

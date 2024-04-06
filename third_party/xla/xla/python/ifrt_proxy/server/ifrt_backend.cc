@@ -304,7 +304,7 @@ BackendInterface::Response IfrtBackend::HandleInit(
   for (const auto& [id, memory] : memories) {
     auto* m = init_resp->add_memories();
     m->set_id(id);
-    m->set_memory_space_kind(AsProtoStringData(memory->memory_space_kind()));
+    m->set_memory_space_kind(AsProtoStringData(memory->kind()));
     for (const auto* device : memory->devices()) {
       m->add_device_ids(device->id());
     }

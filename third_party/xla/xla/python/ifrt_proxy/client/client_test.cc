@@ -145,7 +145,7 @@ TEST_F(ClientTest, Init) {
   ASSERT_THAT(device0->memory_spaces(), SizeIs(1));
   auto* const memory0 = device0->memory_spaces()[0];
   EXPECT_EQ(memory0->id(), 0);
-  EXPECT_EQ(memory0->memory_space_kind(), "mock");
+  EXPECT_EQ(memory0->kind(), "mock");
   EXPECT_THAT(memory0->devices(), UnorderedElementsAre(device0));
   EXPECT_THAT(device0->default_memory_space(), IsOkAndHolds(memory0));
 
@@ -160,7 +160,7 @@ TEST_F(ClientTest, Init) {
   ASSERT_THAT(device1->memory_spaces(), SizeIs(1));
   auto* const memory1 = device1->memory_spaces()[0];
   EXPECT_EQ(memory1->id(), 1);
-  EXPECT_EQ(memory1->memory_space_kind(), "mock");
+  EXPECT_EQ(memory1->kind(), "mock");
   EXPECT_THAT(memory1->devices(), UnorderedElementsAre(device1));
   EXPECT_THAT(device1->default_memory_space(), IsOkAndHolds(memory1));
 

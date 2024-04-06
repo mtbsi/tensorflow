@@ -611,6 +611,8 @@ cc_library(
         ":pjrt_client",
         "@com_google_absl//absl/strings:str_format",
         "@com_google_absl//absl/strings:string_view",
+        "@com_google_absl//absl/types:span",
+        "@local_tsl//tsl/platform:hash",
     ],
 )
 

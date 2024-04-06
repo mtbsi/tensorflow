@@ -952,9 +952,16 @@ PJRT_Error* PJRT_Memory_Kind(PJRT_Memory_Kind_Args* args) {
   PJRT_RETURN_IF_ERROR(ActualStructSizeIsGreaterOrEqual(
       "PJRT_Memory_Kind_Args", PJRT_Memory_Kind_Args_STRUCT_SIZE,
       args->struct_size));
-  args->memory_kind = args->memory->memory_space->memory_space_kind().data();
-  args->memory_kind_size =
-      args->memory->memory_space->memory_space_kind().size();
+  args->kind = args->memory->memory_space->kind().data();
+  args->kind_size = args->memory->memory_space->kind().size();
+  return nullptr;
+}
+
+PJRT_Error* PJRT_Memory_Kind_Id(PJRT_Memory_Kind_Id_Args* args) {
+  PJRT_RETURN_IF_ERROR(ActualStructSizeIsGreaterOrEqual(
+      "PJRT_Memory_Kind_Id_Args", PJRT_Memory_Kind_Id_Args_STRUCT_SIZE,
+      args->struct_size));
+  args->kind_id = args->memory->memory_space->kind_id();
   return nullptr;
 }
 
@@ -2344,6 +2351,7 @@ PJRT_Api CreatePjrtApi(PJRT_Client_Create* create_fn,
 
       /*PJRT_Memory_Id=*/pjrt::PJRT_Memory_Id,
       /*PJRT_Memory_Kind=*/pjrt::PJRT_Memory_Kind,
+      /*PJRT_Memory_Kind_Id=*/pjrt::PJRT_Memory_Kind_Id,
       /*PJRT_Memory_DebugString=*/pjrt::PJRT_Memory_DebugString,
       /*PJRT_Memory_ToString=*/pjrt::PJRT_Memory_ToString,
       /*PJRT_Memory_AddressableByDevices=*/

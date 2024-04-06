@@ -374,7 +374,7 @@ TEST_F(IfrtBackendHandlerTest, Init) {
     EXPECT_CALL(memory, devices())
         .WillRepeatedly(Return(mock_memory_devices[i]));
     EXPECT_CALL(memory, id()).WillRepeatedly(Return(i));
-    EXPECT_CALL(memory, memory_space_kind()).WillRepeatedly(Return("mock"));
+    EXPECT_CALL(memory, kind()).WillRepeatedly(Return("mock"));
   }
 
   std::vector<std::vector<Memory*>> device_memories;

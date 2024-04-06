@@ -43,7 +43,7 @@ class Memory : public xla::ifrt::Memory {
         to_string_(std::move(to_string)) {}
 
   // Not copyable or movable: IFRT expects `string_view` from
-  // `memory_space_kind()` to be stable throughout the client's lifetime.
+  // `kind()` to be stable throughout the client's lifetime.
   Memory(const Memory& other) = delete;
   Memory& operator=(const Memory& other) = delete;
 
@@ -55,9 +55,7 @@ class Memory : public xla::ifrt::Memory {
 
   int id() const override { return id_; }
 
-  absl::string_view memory_space_kind() const override {
-    return memory_space_kind_;
-  }
+  absl::string_view kind() const override { return memory_space_kind_; }
 
   absl::string_view DebugString() const override { return debug_string_; }
 
